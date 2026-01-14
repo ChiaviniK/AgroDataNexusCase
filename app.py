@@ -112,7 +112,8 @@ try:
 except:
     df_full = df_fin.copy() # Fallback
 
-# --- SIDEBAR ---
+# --- # --- SUBSTIRUIR A PARTE DA SIDEBAR POR ESTE BLOCO CORRIGIDO ---
+
 with st.sidebar:
     st.image("https://img.icons8.com/dusk/96/tractor.png", width=80)
     st.title("AgroData Nexus")
@@ -122,25 +123,38 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # Seletor de Data
+    # Validação de Datas para evitar erros
     if not df_full.empty:
         max_date = df_full.index.max().date()
         min_date = df_full.index.min().date()
-        selected_date = st.date_input("Dia Foco:", value=max_date, min_value=min_date, max_value=max_date)
     else:
-        selected_date = datetime.now().date()
-        min_date = selected_date
-        max_date = selected_date
+        # Fallback total de segurança
+        max_date = datetime.now().date()
+        min_date = max_date - timedelta(days=30)
+
+    # 1. Seletor de Data de Análise (KPIs)
+    st.header("1. Data de Análise (KPIs)")
+    selected_date = st.date_input("Dia Foco:", value=max_date, min_value=min_date, max_value=max_date)
 
     st.markdown("---")
 
-    # Filtro de Período Gráfico
-    st.header("Período de Análise")
+    # 2. Filtro de Período para os GRÁFICOS
+    st.header("2. Período do Gráfico")
+    
+    # --- LÓGICA DE SEGURANÇA PARA O VALOR PADRÃO ---
+    # Tentamos mostrar os últimos 180 dias. 
+    # Se a base for menor que 180 dias, usamos a data mínima como início.
+    default_start_value = max_date - timedelta(days=180)
+    if default_start_value < min_date:
+        default_start_value = min_date
+
     col_d1, col_d2 = st.columns(2)
     with col_d1:
-        start_date_graph = st.date_input("De:", value=min_date + timedelta(days=300), min_value=min_date, max_value=max_date)
+        start_date_graph = st.date_input("De:", value=default_start_value, min_value=min_date, max_value=max_date)
     with col_d2:
         end_date_graph = st.date_input("Até:", value=max_date, min_value=min_date, max_value=max_date)
+
+# --- FIM DA CORREÇÃO ---
 
 if start_date_graph > end_date_graph:
     st.error("Erro: Data Inicial maior que Final.")
