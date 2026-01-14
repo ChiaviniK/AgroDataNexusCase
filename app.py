@@ -26,20 +26,22 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- FUNÇÕES DE DADOS ---
+# --- FUNÇÕES GERADORAS DE DADOS (FALLBACK) ---
 
 def gerar_dados_financeiros_fake():
-    """Gera dados simulados se tudo falhar"""
+    """Gera dados simulados se a API falhar"""
     datas = pd.date_range(end=datetime.now(), periods=365, freq='B')
     n = len(datas)
+    # Random Walk
     dolar = 5.0 + np.cumsum(np.random.normal(0, 0.05, n))
     jbs = 25.0 + np.cumsum(np.random.normal(0, 0.5, n))
     df = pd.DataFrame({'Dolar': dolar, 'JBS': jbs}, index=datas)
+    # Arroba simulada seguindo JBS
     df['Boi_Gordo'] = (df['JBS'] * 8.5) + 50 + np.random.normal(0, 2, n)
     return df
 
 def gerar_dados_clima_fake():
-    """Gera clima simulado se tudo falhar"""
+    """Gera dados de clima simulados se a API falhar"""
     datas = pd.date_range(end=datetime.now(), periods=365, freq='D')
     n = len(datas)
     temp = 30 + 5 * np.sin(np.linspace(0, 3.14, n)) + np.random.normal(0, 2, n)
@@ -47,16 +49,19 @@ def gerar_dados_clima_fake():
     df = pd.DataFrame({'Temp_Max': temp, 'Chuva_mm': chuva}, index=datas)
     return df
 
+# --- FUNÇÕES DE API (CACHED) ---
+
 @st.cache_data
 def get_finance_history():
     tickers = ['BRL=X', 'JBSS3.SA']
     try:
+        # Tenta baixar da API
         df = yf.download(tickers, period="2y", interval="1d", progress=False)['Close']
         if df.empty or len(df) < 10: raise Exception("Dados vazios")
         
         df.columns = ['Dolar', 'JBS']
         df.index = df.index.tz_localize(None) 
-        df['Boi_Gordo'] = (df['JBS'] * 8.5) + 50 
+        df['Boi_Gordo'] = (df['JBS'] * 8.5) + 50 # Simulação baseada em JBS
         return df, True
     except:
         return gerar_dados_financeiros_fake(), False
@@ -66,7 +71,7 @@ def get_weather_history():
     try:
         lat, lon = -11.86, -55.50 # Sinop-MT
         end_date = datetime.now().strftime('%Y-%m-%d')
-        start_date = (datetime.now() - timedelta(days=730)).strftime('%Y-%m-%d')
+        start_date = (datetime.now() - timedelta(days=730)).strftime('%Y-%m-%d') # 2 anos
         
         url = f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}&start_date={start_date}&end_date={end_date}&daily=temperature_2m_max,precipitation_sum&timezone=America%2FSao_Paulo"
         
@@ -85,105 +90,103 @@ def get_weather_history():
     except:
         return gerar_dados_clima_fake(), False
 
-# --- CARGA E TRATAMENTO DE DADOS ---
+# --- CARGA E MERGE DE DADOS ---
 df_fin, status_fin = get_finance_history()
 df_clima, status_clima = get_weather_history()
 
 try:
-    # Outer Join para manter tudo
+    # Merge mantendo todas as datas (Outer Join)
     df_full = pd.concat([df_fin, df_clima], axis=1).sort_index()
     
-    # Preenchimentos
+    # Tratamento de Nulos
     df_full['Dolar'] = df_full['Dolar'].ffill()
     df_full['JBS'] = df_full['JBS'].ffill()
     df_full['Boi_Gordo'] = df_full['Boi_Gordo'].ffill()
-    df_full['Chuva_mm'] = df_full['Chuva_mm'].fillna(0)
+    df_full['Chuva_mm'] = df_full['Chuva_mm'].fillna(0) # Se não tem dado de chuva, assume 0
     df_full['Temp_Max'] = df_full['Temp_Max'].ffill()
     
-    df_full = df_full.dropna() # Remove sobras do início
+    # Garante que colunas existam mesmo se API falhar
+    if 'Chuva_mm' not in df_full.columns: df_full['Chuva_mm'] = 0.0
+    
+    df_full = df_full.dropna() # Remove dias iniciais sem histórico
 except:
     df_full = pd.DataFrame()
 
-# --- TRAVA DE SEGURANÇA (O PULO DO GATO) ---
-# Se o dataframe estiver vazio, paramos o app AQUI.
-# Isso impede o erro "iloc[-1]" lá na frente.
+# TRAVA DE SEGURANÇA FINAL (Se tudo falhar, gera fake de novo)
 if df_full.empty:
-    st.warning("⚠️ Falha na conexão com APIs e na geração de backup.")
-    st.info("Tentando regenerar dados simulados de emergência...")
     df_full = gerar_dados_financeiros_fake()
-    # Se mesmo assim falhar (muito raro):
-    if df_full.empty:
-        st.error("Erro Crítico: Não há dados para exibir. Recarregue a página.")
-        st.stop()
+    df_full['Chuva_mm'] = 0.0
+    df_full['Temp_Max'] = 30.0
 
-# --- SIDEBAR ---
+# --- SIDEBAR (NAVEGAÇÃO E FILTROS) ---
 with st.sidebar:
     st.image("https://img.icons8.com/dusk/96/tractor.png", width=80)
     st.title("AgroData Nexus")
     
-    if not status_fin: st.toast("Modo Simulação (Financeiro)", icon="⚠️")
-    if not status_clima: st.toast("Modo Simulação (Clima)", icon="☁️")
+    if not status_fin: st.toast("⚠️ Dados Financeiros: Modo Simulação", icon="⚠️")
+    if not status_clima: st.toast("⚠️ Dados Climáticos: Modo Simulação", icon="☁️")
     
     st.markdown("---")
     
-    # Definição segura de datas
+    # Define limites de data com segurança
     max_date = df_full.index.max().date()
     min_date = df_full.index.min().date()
 
-    # 1. Seletor de Data
-    st.header("1. Análise Pontual")
+    # 1. Seletor de Data de Análise (KPIs)
+    st.header("1. Data de Análise (KPIs)")
     selected_date = st.date_input("Dia Foco:", value=max_date, min_value=min_date, max_value=max_date)
 
     st.markdown("---")
 
-    # 2. Filtro Gráfico (Lógica Corrigida)
-    st.header("2. Período Gráfico")
+    # 2. Filtro de Período para os GRÁFICOS
+    st.header("2. Período do Gráfico")
     
-    # Valor padrão: Últimos 180 dias (se houver dados suficientes)
+    # Lógica de segurança para data padrão
+    # Tenta pegar 180 dias atrás. Se for menor que o min_date, usa min_date
     default_start = max_date - timedelta(days=180)
     if default_start < min_date:
         default_start = min_date
-        
+
     col_d1, col_d2 = st.columns(2)
     with col_d1:
         start_date_graph = st.date_input("De:", value=default_start, min_value=min_date, max_value=max_date)
     with col_d2:
         end_date_graph = st.date_input("Até:", value=max_date, min_value=min_date, max_value=max_date)
 
+# Validação do Filtro
 if start_date_graph > end_date_graph:
-    st.error("Data Inicial maior que Final.")
+    st.error("Erro: Data Inicial maior que Final.")
     st.stop()
 
-# Filtro
+# Aplica Filtro para Gráficos
 mask = (df_full.index.date >= start_date_graph) & (df_full.index.date <= end_date_graph)
 df_filtered = df_full.loc[mask]
 
-# --- KPI CALCULATION ---
+# --- CÁLCULO DE KPIs ---
 try:
+    # Tenta encontrar o índice da data selecionada ou o anterior mais próximo
     ts_selected = pd.Timestamp(selected_date)
-    # Tenta achar o índice exato ou anterior
     idx = df_full.index.get_indexer([ts_selected], method='ffill')[0]
     
-    if idx == -1: # Se data selecionada for antes do início do df
-        idx = 0
+    if idx == -1: idx = 0 # Segurança se data for muito antiga
         
     dia_dados = df_full.iloc[idx]
     dia_anterior = df_full.iloc[idx - 1] if idx > 0 else dia_dados
-
-except Exception as e:
-    # Se der qualquer erro aqui, pega o último dia disponível com segurança
+except:
+    # Fallback extremo
     dia_dados = df_full.iloc[-1]
-    dia_anterior = df_full.iloc[-2] if len(df_full) > 1 else dia_dados
+    dia_anterior = df_full.iloc[-2]
 
 # --- DASHBOARD ---
 st.title(f"Monitor de Mercado: {selected_date.strftime('%d/%m/%Y')}")
 
+# Exibição de Métricas
 col1, col2, col3, col4 = st.columns(4)
-def safe_metric(label, current, prev, prefix="R$ "):
+def safe_metric(label, val_curr, val_prev, prefix="R$ "):
     try:
-        val = float(current)
-        d = float(current) - float(prev)
-        st.metric(label, f"{prefix}{val:.2f}", f"{d:.2f}")
+        curr = float(val_curr)
+        delta = curr - float(val_prev)
+        st.metric(label, f"{prefix}{curr:.2f}", f"{delta:.2f}")
     except:
         st.metric(label, "N/A", "0.00")
 
@@ -196,40 +199,69 @@ with col4:
 
 st.markdown("---")
 
-# --- ABAS E GRÁFICOS ---
-tab1, tab2, tab3, tab4 = st.tabs(["Tendências", "Volatilidade", "Correlações", "Downloads"])
+# --- ABAS DE GRÁFICOS ---
+st.subheader("📈 Inteligência de Mercado")
 
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📊 Tendências", 
+    "📦 Volatilidade (Risco)", 
+    "🧲 Correlações",
+    "💾 Downloads"
+])
+
+# 1. TENDÊNCIAS
 with tab1:
-    st.subheader("Evolução Temporal")
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df_filtered.index, y=df_filtered['Dolar'], name="Dólar", line=dict(color='#2ecc71')))
-    fig.add_trace(go.Scatter(x=df_filtered.index, y=df_filtered['Boi_Gordo'], name="Boi Gordo", visible='legendonly', line=dict(color='#8e44ad')))
-    fig.update_layout(height=400, template="plotly_white")
-    st.plotly_chart(fig, use_container_width=True)
+    fig_ind = go.Figure()
+    fig_ind.add_trace(go.Scatter(x=df_filtered.index, y=df_filtered['Dolar'], name="Dólar", line=dict(color='#2ecc71')))
+    fig_ind.add_trace(go.Scatter(x=df_filtered.index, y=df_filtered['Boi_Gordo'], name="Boi Gordo", visible='legendonly', line=dict(color='#8e44ad')))
+    fig_ind.update_layout(height=400, template="plotly_white")
+    st.plotly_chart(fig_ind, use_container_width=True)
 
+# 2. VOLATILIDADE (Boxplot)
 with tab2:
-    st.subheader("Análise de Risco (Boxplot Mensal)")
+    st.caption("Distribuição de preços por mês (Identificação de Risco)")
     df_box = df_filtered.copy()
     df_box['Mes'] = df_box.index.strftime('%Y-%m')
     opt = st.radio("Ativo:", ["Boi_Gordo", "Dolar", "JBS"], horizontal=True)
+    
     fig_box = px.box(df_box, x="Mes", y=opt, points="all", color_discrete_sequence=['#2e7d32'])
     st.plotly_chart(fig_box, use_container_width=True)
 
+# 3. CORRELAÇÕES (Com Try/Except para evitar erro OLS)
 with tab3:
     c1, c2 = st.columns(2)
+    
     with c1:
         st.subheader("Dispersão: Dólar x Boi")
-        fig_scat = px.scatter(df_filtered, x="Dolar", y="Boi_Gordo", trendline="ols", title="Correlação", color="Chuva_mm")
+        try:
+            # Tenta criar com linha de tendência (requer statsmodels)
+            fig_scat = px.scatter(df_filtered, x="Dolar", y="Boi_Gordo", 
+                                 trendline="ols", 
+                                 title="Correlação (Com Tendência)", 
+                                 color="Chuva_mm")
+        except Exception as e:
+            # Se falhar (falta de lib ou dados sujos), cria simples
+            fig_scat = px.scatter(df_filtered, x="Dolar", y="Boi_Gordo", 
+                                 title="Correlação (Simples)", 
+                                 color="Chuva_mm")
+            
         st.plotly_chart(fig_scat, use_container_width=True)
+
     with c2:
         st.subheader("Matriz de Correlação")
-        cols_corr = ['Dolar', 'Boi_Gordo', 'JBS', 'Chuva_mm', 'Temp_Max']
-        # Garante que as colunas existem antes de correlacionar
-        cols_existentes = [c for c in cols_corr if c in df_filtered.columns]
-        corr = df_filtered[cols_existentes].corr()
-        fig_heat = px.imshow(corr, text_auto=True, color_continuous_scale="RdBu_r")
-        st.plotly_chart(fig_heat, use_container_width=True)
+        cols = ['Dolar', 'Boi_Gordo', 'JBS', 'Chuva_mm', 'Temp_Max']
+        cols_validas = [c for c in cols if c in df_filtered.columns]
+        
+        if len(cols_validas) > 1:
+            corr = df_filtered[cols_validas].corr()
+            fig_heat = px.imshow(corr, text_auto=True, color_continuous_scale="RdBu_r")
+            st.plotly_chart(fig_heat, use_container_width=True)
+        else:
+            st.info("Dados insuficientes para correlação.")
 
+# 4. DOWNLOADS
 with tab4:
-    st.info("Download de Dados")
-    st.download_button("📥 CSV Completo", df_full.to_csv(), "agro_data.csv", "text/csv")
+    st.info("Central de Engenharia de Dados")
+    c_dw1, c_dw2 = st.columns(2)
+    with c_dw1: st.download_button("📥 CSV Financeiro", df_fin.to_csv(), "finance.csv", "text/csv")
+    with c_dw2: st.download_button("📥 CSV Clima", df_clima.to_csv(), "weather.csv", "text/csv")
