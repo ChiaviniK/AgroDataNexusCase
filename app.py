@@ -178,7 +178,7 @@ except:
     dia_anterior = df_full.iloc[-2]
 
 # --- DASHBOARD ---
-st.title(f"Monitor de Mercado: {selected_date.strftime('%d/%m/%Y')}")
+st.title(f"SITE FORA DO AR: {selected_date.strftime('%d/%m/%Y')}")
 
 # Exibição de Métricas
 col1, col2, col3, col4 = st.columns(4)
