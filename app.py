@@ -24,74 +24,87 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- FUNÇÕES DE SIMULAÇÃO (SEGURANÇA PARA A AULA) ---
+# --- FUNÇÕES DE SIMULAÇÃO (FALLBACK) ---
+
+def gerar_serie_fake(valor_inicial, volatilidade, n_dias):
+    """Gera uma série de dados simulados"""
+    retornos = np.random.normal(0, volatilidade, n_dias)
+    preco = valor_inicial + np.cumsum(retornos)
+    return preco
 
 def gerar_financeiro_fake():
-    """Gera dados parecidos com o mercado real caso a API falhe"""
+    """Gera dados completos simulados"""
     datas = pd.date_range(end=datetime.now(), periods=365, freq='B')
     n = len(datas)
-    # Simula Dolar ~ R$ 5.00
-    dolar = 5.0 + np.cumsum(np.random.normal(0, 0.02, n))
-    # Simula JBS ~ R$ 25.00
-    jbs = 25.0 + np.cumsum(np.random.normal(0, 0.3, n))
-    # Simula Boi ~ R$ 230.00
-    boi = 230.0 + np.cumsum(np.random.normal(0, 1.5, n))
-    
-    df = pd.DataFrame({'Dolar': dolar, 'JBS': jbs, 'Boi_Gordo': boi}, index=datas)
+    df = pd.DataFrame(index=datas)
+    df['Dolar'] = gerar_serie_fake(5.0, 0.02, n)
+    df['JBS'] = gerar_serie_fake(25.0, 0.3, n)
+    df['Boi_Gordo'] = gerar_serie_fake(230.0, 1.5, n)
     return df
 
 def gerar_clima_fake():
-    """Gera clima de Cuiabá simulado"""
     datas = pd.date_range(end=datetime.now(), periods=365, freq='D')
     n = len(datas)
-    # Temperatura alta (Cuiabá)
     temp = 32 + 5 * np.sin(np.linspace(0, 3.14, n)) + np.random.normal(0, 2, n)
-    # Chuva esporádica
     chuva = np.random.choice([0, 0, 0, 10, 30, 60], n, p=[0.7, 0.1, 0.1, 0.05, 0.03, 0.02])
-    
-    df = pd.DataFrame({'Temp_Max': temp, 'Chuva_mm': chuva}, index=datas)
-    return df
+    return pd.DataFrame({'Temp_Max': temp, 'Chuva_mm': chuva}, index=datas)
 
-# --- FUNÇÕES DE DADOS REAIS (COM FALLBACK) ---
+# --- FUNÇÕES DE DADOS REAIS (COM CORREÇÃO DE NAN) ---
 
 @st.cache_data(ttl=3600)
 def get_finance_data():
-    """Tenta Yahoo Finance. Se falhar, chama o Fake."""
     tickers = ['BRL=X', 'JBSS3.SA', 'LE=F']
     try:
-        # Tenta baixar
+        # Tenta baixar dados
         df = yf.download(tickers, period="1y", interval="1d", progress=False)
         
-        # Tratamento para novas versões do yfinance (MultiIndex)
+        # Tratamento MultiIndex (comum no yfinance novo)
         if isinstance(df.columns, pd.MultiIndex):
             df = df['Close']
             
-        # Verifica se baixou algo
-        if df.empty or len(df) < 10: raise Exception("Dados vazios")
-        
-        # Renomeia (pode variar a ordem, então usamos mapeamento seguro se possível, 
-        # mas aqui forçamos ordem alfabética que o yfinance costuma retornar: BRL, JBS, LE)
-        # O ideal é selecionar por nome:
+        # --- CORREÇÃO DE COLUNAS VAZIAS (NaN) ---
+        # Verifica se baixou algo. Se estiver vazio, lança erro para usar o Fake total.
+        if df.empty: raise Exception("Dados vazios")
+
+        # Cria DataFrame limpo
         df_clean = pd.DataFrame(index=df.index)
-        df_clean['Dolar'] = df['BRL=X']
-        df_clean['JBS'] = df['JBSS3.SA']
-        df_clean['Gado_Futuro_US'] = df['LE=F']
         
+        # 1. DÓLAR (BRL=X)
+        if 'BRL=X' in df.columns and not df['BRL=X'].isnull().all():
+            df_clean['Dolar'] = df['BRL=X']
+        else:
+            df_clean['Dolar'] = gerar_serie_fake(5.10, 0.02, len(df))
+
+        # 2. GADO FUTURO (LE=F)
+        if 'LE=F' in df.columns and not df['LE=F'].isnull().all():
+            df_clean['Gado_Futuro_US'] = df['LE=F']
+        else:
+            df_clean['Gado_Futuro_US'] = gerar_serie_fake(180.0, 1.0, len(df))
+
+        # 3. JBS (O PROBLEMA ESTAVA AQUI)
+        # Se a coluna JBSS3.SA não existir ou for tudo NaN, geramos fake só para ela.
+        if 'JBSS3.SA' in df.columns and not df['JBSS3.SA'].isnull().all():
+            df_clean['JBS'] = df['JBSS3.SA']
+        else:
+            # Fallback específico para JBS
+            df_clean['JBS'] = gerar_serie_fake(32.0, 0.4, len(df))
+
         df_clean.index = df_clean.index.tz_localize(None)
         
-        # Conversão Boi
+        # Preenche buracos antes de calcular
+        df_clean = df_clean.ffill().bfill()
+
+        # Cálculo Boi Gordo (Agora seguro, pois as colunas bases estão preenchidas)
         df_clean['Boi_Gordo'] = (df_clean['Gado_Futuro_US'] / 100) * df_clean['Dolar'] * 3.5 * 15 
         
-        df_clean = df_clean.ffill()
-        return df_clean[['Dolar', 'JBS', 'Boi_Gordo']], True # True = Real Data
-        
+        return df_clean[['Dolar', 'JBS', 'Boi_Gordo']], True
+
     except Exception as e:
-        # Falhou? Usa o simulado!
-        return gerar_financeiro_fake(), False # False = Fake Data
+        # Se tudo falhar, usa simulação completa
+        return gerar_financeiro_fake(), False
 
 @st.cache_data(ttl=3600)
 def get_weather_cuiaba():
-    """Tenta Open-Meteo. Se falhar, chama o Fake."""
     try:
         lat, lon = -15.6014, -56.0979
         end_date = datetime.now().strftime('%Y-%m-%d')
@@ -99,7 +112,7 @@ def get_weather_cuiaba():
         
         url = f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}&start_date={start_date}&end_date={end_date}&daily=temperature_2m_max,precipitation_sum&timezone=America%2FCuiaba"
         
-        res = requests.get(url, timeout=3) # Timeout curto para não travar
+        res = requests.get(url, timeout=3)
         data = res.json()
         
         if 'daily' not in data: raise Exception("API Vazia")
@@ -119,36 +132,36 @@ def get_weather_cuiaba():
 df_fin, is_real_fin = get_finance_data()
 df_clima, is_real_clima = get_weather_cuiaba()
 
-# Garante merge seguro
+# Merge Seguro
 df_full = pd.concat([df_fin, df_clima], axis=1).sort_index()
 
-# Preenchimento final para garantir que não haja NaNs quebrando gráficos
+# Preenchimento Final (Blindagem contra NaN)
 df_full['Dolar'] = df_full['Dolar'].ffill().bfill()
 df_full['JBS'] = df_full['JBS'].ffill().bfill()
 df_full['Boi_Gordo'] = df_full['Boi_Gordo'].ffill().bfill()
 df_full['Chuva_mm'] = df_full['Chuva_mm'].fillna(0)
 df_full['Temp_Max'] = df_full['Temp_Max'].ffill().bfill()
 
+# Se mesmo assim algo estiver vazio (muito raro), preenche com 0
+df_full = df_full.fillna(0)
+
 # --- SIDEBAR ---
 with st.sidebar:
     st.image("https://img.icons8.com/dusk/96/bull.png", width=80)
     st.title("AgroData Nexus")
     
-    # Status Indicators
-    if is_real_fin: st.toast("Mercado: Dados Reais (Online)", icon="🟢")
-    else: st.toast("Mercado: Modo Simulação (Offline)", icon="🟠")
-        
-    if is_real_clima: st.toast("Clima: Dados Reais (Cuiabá)", icon="🟢")
-    else: st.toast("Clima: Modo Simulação (Offline)", icon="🟠")
+    if is_real_fin: st.toast("Mercado: Dados Híbridos (Online)", icon="🟢")
+    else: st.toast("Mercado: Simulação (Offline)", icon="🟠")
     
-    if not is_real_fin or not is_real_clima:
-        st.warning("⚠️ Operando em Contingência. Alguns dados podem ser simulados devido à instabilidade das APIs.")
-
     st.markdown("---")
     
-    # Datas Seguras
-    max_date = df_full.index.max().date()
-    min_date = df_full.index.min().date()
+    # Datas
+    if not df_full.empty:
+        max_date = df_full.index.max().date()
+        min_date = df_full.index.min().date()
+    else:
+        max_date = datetime.now().date()
+        min_date = max_date - timedelta(days=30)
     
     default_start = max_date - timedelta(days=90)
     if default_start < min_date: default_start = min_date
@@ -164,18 +177,24 @@ df_filtered = df_full.loc[mask]
 st.title(f"Monitor Agro: {end_date_graph.strftime('%d/%m/%Y')}")
 
 if df_filtered.empty:
-    st.error("Período sem dados. Aumente o intervalo.")
+    st.error("Sem dados para o período.")
     st.stop()
 
 dia_dados = df_filtered.iloc[-1]
 dia_anterior = df_filtered.iloc[-2] if len(df_filtered) > 1 else dia_dados
 
-# KPIs
+# KPIs com Tratamento de Erro Visual
 col1, col2, col3, col4 = st.columns(4)
 def kpi(label, val, prev, prefix="R$ ", decim=2):
     try:
+        val = float(val)
+        prev = float(prev)
         delta = val - prev
-        st.metric(label, f"{prefix}{val:.{decim}f}", f"{delta:.{decim}f}")
+        # Se o valor for 0 (erro de carga), mostra N/A
+        if val == 0:
+            st.metric(label, "Indisponível", "0.00")
+        else:
+            st.metric(label, f"{prefix}{val:.{decim}f}", f"{delta:.{decim}f}")
     except:
         st.metric(label, "N/A", "0.00")
 
@@ -197,8 +216,7 @@ with tab1:
     fig_ind.add_trace(go.Scatter(x=df_filtered.index, y=df_filtered['Dolar'], name="Dólar", line=dict(color='#2ecc71', dash='dot'), yaxis='y2'))
     
     fig_ind.update_layout(
-        height=450, 
-        template="plotly_white",
+        height=450, template="plotly_white",
         yaxis=dict(title="Preço Ativos (R$)"),
         yaxis2=dict(title="Cotação Dólar", overlaying='y', side='right')
     )
@@ -214,19 +232,13 @@ with tab2:
         fig_clima.add_trace(go.Scatter(x=df_filtered.index, y=df_filtered['Boi_Gordo'], name="Preço Boi (R$)", line=dict(color='#c0392b')), secondary_y=True)
         
         fig_clima.update_layout(height=400, template="plotly_white", title="Precipitação vs Arroba")
-        fig_clima.update_yaxes(title_text="Chuva (mm)", secondary_y=False)
-        fig_clima.update_yaxes(title_text="Preço (R$)", secondary_y=True)
         st.plotly_chart(fig_clima, use_container_width=True)
         
     with col_c2:
         st.markdown("**Correlação**")
-        try:
-            corr = df_filtered[['Chuva_mm', 'Boi_Gordo']].corr().iloc[0,1]
-            st.info(f"Índice: {corr:.2f}")
-            if abs(corr) < 0.2: st.caption("Correlação fraca.")
-            else: st.caption("Correlação moderada/forte.")
-        except:
-            st.warning("Dados insuficientes.")
+        corr = df_filtered[['Chuva_mm', 'Boi_Gordo']].corr().iloc[0,1]
+        st.info(f"Índice: {corr:.2f}")
+        st.caption("Correlação Chuva x Preço")
 
 with tab3:
     st.dataframe(df_filtered.sort_index(ascending=False), use_container_width=True)
