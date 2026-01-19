@@ -5,11 +5,10 @@ import requests
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
-from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 
 # --- Configuração "Agro Profissional" ---
-st.set_page_config(page_title="AgroData Nexus", page_icon="🌾", layout="wide")
+st.set_page_config(page_title="AgroData Nexus | Real-Time", page_icon="🐮", layout="wide")
 
 st.markdown("""
 <style>
@@ -22,246 +21,219 @@ st.markdown("""
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
     .stButton>button { background-color: #2e7d32; color: white; border-radius: 4px; border: none; }
-    [data-testid="stSidebar"] { background-color: #e8f5e9; border-right: 1px solid #c8e6c9; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- FUNÇÕES GERADORAS DE DADOS (FALLBACK) ---
+# --- FUNÇÕES DE DADOS (AGORA REAIS) ---
 
-def gerar_dados_financeiros_fake():
-    """Gera dados simulados se a API falhar"""
-    datas = pd.date_range(end=datetime.now(), periods=365, freq='B')
-    n = len(datas)
-    # Random Walk
-    dolar = 5.0 + np.cumsum(np.random.normal(0, 0.05, n))
-    jbs = 25.0 + np.cumsum(np.random.normal(0, 0.5, n))
-    df = pd.DataFrame({'Dolar': dolar, 'JBS': jbs}, index=datas)
-    # Arroba simulada seguindo JBS
-    df['Boi_Gordo'] = (df['JBS'] * 8.5) + 50 + np.random.normal(0, 2, n)
-    return df
-
-def gerar_dados_clima_fake():
-    """Gera dados de clima simulados se a API falhar"""
-    datas = pd.date_range(end=datetime.now(), periods=365, freq='D')
-    n = len(datas)
-    temp = 30 + 5 * np.sin(np.linspace(0, 3.14, n)) + np.random.normal(0, 2, n)
-    chuva = np.random.choice([0, 0, 0, 0, 10, 25, 50], n, p=[0.6, 0.1, 0.1, 0.1, 0.05, 0.03, 0.02])
-    df = pd.DataFrame({'Temp_Max': temp, 'Chuva_mm': chuva}, index=datas)
-    return df
-
-# --- FUNÇÕES DE API (CACHED) ---
-
-@st.cache_data
-def get_finance_history():
-    tickers = ['BRL=X', 'JBSS3.SA']
+@st.cache_data(ttl=3600) # Cache de 1 hora
+def get_finance_data():
+    """
+    Baixa dados REAIS do Yahoo Finance.
+    BRL=X: Dólar
+    JBSS3.SA: JBS na B3
+    LE=F: Live Cattle (Gado Vivo) na Bolsa de Chicago
+    """
+    tickers = ['BRL=X', 'JBSS3.SA', 'LE=F']
     try:
-        # Tenta baixar da API
+        # Baixa os últimos 2 anos (730 dias)
         df = yf.download(tickers, period="2y", interval="1d", progress=False)['Close']
-        if df.empty or len(df) < 10: raise Exception("Dados vazios")
         
-        df.columns = ['Dolar', 'JBS']
-        df.index = df.index.tz_localize(None) 
-        df['Boi_Gordo'] = (df['JBS'] * 8.5) + 50 # Simulação baseada em JBS
+        # Renomeia colunas para facilitar
+        df.columns = ['Dolar', 'JBS', 'Gado_Futuro_US']
+        
+        # Remove fuso horário para cruzar com clima
+        df.index = df.index.tz_localize(None)
+        
+        # --- ENGENHARIA DE DADOS (CONVERSÃO DE PREÇO) ---
+        # O Gado Futuro (LE=F) vem em Centavos de Dólar por Libra-peso (lb).
+        # Precisamos converter para Reais por Arroba (@ = 15kg).
+        # Fator aproximado de conversão de mercado + Ágio Brasil
+        df['Boi_Gordo'] = (df['Gado_Futuro_US'] / 100) * df['Dolar'] * 3.5 * 15 
+        
+        # Preenchimento de feriados (ffill)
+        df = df.ffill()
+        
         return df, True
-    except:
-        return gerar_dados_financeiros_fake(), False
+    except Exception as e:
+        st.error(f"Erro na API Financeira: {e}")
+        return pd.DataFrame(), False
 
-@st.cache_data
-def get_weather_history():
+@st.cache_data(ttl=3600)
+def get_weather_cuiaba():
+    """
+    Baixa dados REAIS de Clima para CUIABÁ (Open-Meteo).
+    """
     try:
-        lat, lon = -11.86, -55.50 # Sinop-MT
+        # Coordenadas de Cuiabá, MT
+        lat, lon = -15.6014, -56.0979
+        
         end_date = datetime.now().strftime('%Y-%m-%d')
-        start_date = (datetime.now() - timedelta(days=730)).strftime('%Y-%m-%d') # 2 anos
+        start_date = (datetime.now() - timedelta(days=730)).strftime('%Y-%m-%d')
         
-        url = f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}&start_date={start_date}&end_date={end_date}&daily=temperature_2m_max,precipitation_sum&timezone=America%2FSao_Paulo"
+        url = f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}&start_date={start_date}&end_date={end_date}&daily=temperature_2m_max,precipitation_sum&timezone=America%2FCuiaba"
         
-        res = requests.get(url, timeout=5)
+        res = requests.get(url, timeout=10)
         data = res.json()
-        if 'daily' not in data: raise Exception("API Clima falhou")
+        
+        if 'daily' not in data: raise Exception("API Clima sem dados")
 
         df = pd.DataFrame({
             'Date': data['daily']['time'],
             'Temp_Max': data['daily']['temperature_2m_max'],
             'Chuva_mm': data['daily']['precipitation_sum']
         })
+        
+        # Converte coluna Date para datetime e define como index
         df['Date'] = pd.to_datetime(df['Date'])
         df.set_index('Date', inplace=True)
+        
         return df, True
-    except:
-        return gerar_dados_clima_fake(), False
+    except Exception as e:
+        st.error(f"Erro na API Clima: {e}")
+        return pd.DataFrame(), False
 
-# --- CARGA E MERGE DE DADOS ---
-df_fin, status_fin = get_finance_history()
-df_clima, status_clima = get_weather_history()
+# --- CARGA E MERGE (ETL) ---
+df_fin, status_fin = get_finance_data()
+df_clima, status_clima = get_weather_cuiaba()
 
+# Consolidação dos Dados (Merge)
 try:
-    # Merge mantendo todas as datas (Outer Join)
-    df_full = pd.concat([df_fin, df_clima], axis=1).sort_index()
-    
-    # Tratamento de Nulos
-    df_full['Dolar'] = df_full['Dolar'].ffill()
-    df_full['JBS'] = df_full['JBS'].ffill()
-    df_full['Boi_Gordo'] = df_full['Boi_Gordo'].ffill()
-    df_full['Chuva_mm'] = df_full['Chuva_mm'].fillna(0) # Se não tem dado de chuva, assume 0
-    df_full['Temp_Max'] = df_full['Temp_Max'].ffill()
-    
-    # Garante que colunas existam mesmo se API falhar
-    if 'Chuva_mm' not in df_full.columns: df_full['Chuva_mm'] = 0.0
-    
-    df_full = df_full.dropna() # Remove dias iniciais sem histórico
+    if not df_fin.empty and not df_clima.empty:
+        # Outer join para não perder dias de chuva (domingos) nem dias de bolsa (feriados climáticos?)
+        df_full = pd.concat([df_fin, df_clima], axis=1).sort_index()
+        
+        # Tratamento de Nulos
+        df_full['Dolar'] = df_full['Dolar'].ffill()
+        df_full['JBS'] = df_full['JBS'].ffill()
+        df_full['Boi_Gordo'] = df_full['Boi_Gordo'].ffill()
+        df_full['Chuva_mm'] = df_full['Chuva_mm'].fillna(0) # Chuva nula vira 0
+        df_full['Temp_Max'] = df_full['Temp_Max'].ffill()
+        
+        # Remove os dias muito antigos ou vazios no início
+        df_full = df_full.dropna().tail(730)
+    else:
+        st.error("Falha crítica ao carregar dados reais.")
+        st.stop()
 except:
-    df_full = pd.DataFrame()
+    st.error("Erro no processamento dos dados.")
+    st.stop()
 
-# TRAVA DE SEGURANÇA FINAL (Se tudo falhar, gera fake de novo)
-if df_full.empty:
-    df_full = gerar_dados_financeiros_fake()
-    df_full['Chuva_mm'] = 0.0
-    df_full['Temp_Max'] = 30.0
-
-# --- SIDEBAR (NAVEGAÇÃO E FILTROS) ---
+# --- SIDEBAR ---
 with st.sidebar:
-    st.image("https://img.icons8.com/dusk/96/tractor.png", width=80)
+    st.image("https://img.icons8.com/dusk/96/bull.png", width=80)
     st.title("AgroData Nexus")
+    st.caption("📍 Dados: Cuiabá/MT & B3/Chicago")
     
-    if not status_fin: st.toast("⚠️ Dados Financeiros: Modo Simulação", icon="⚠️")
-    if not status_clima: st.toast("⚠️ Dados Climáticos: Modo Simulação", icon="☁️")
+    if status_fin: st.toast("Mercado Financeiro: Online (Real)", icon="🟢")
+    if status_clima: st.toast("Clima Cuiabá: Online (Real)", icon="🟢")
     
     st.markdown("---")
     
-    # Define limites de data com segurança
+    # Datas
     max_date = df_full.index.max().date()
     min_date = df_full.index.min().date()
 
-    # 1. Seletor de Data de Análise (KPIs)
-    st.header("1. Data de Análise (KPIs)")
-    selected_date = st.date_input("Dia Foco:", value=max_date, min_value=min_date, max_value=max_date)
-
-    st.markdown("---")
-
-    # 2. Filtro de Período para os GRÁFICOS
-    st.header("2. Período do Gráfico")
+    st.header("1. Filtro Temporal")
     
-    # Lógica de segurança para data padrão
-    # Tenta pegar 180 dias atrás. Se for menor que o min_date, usa min_date
     default_start = max_date - timedelta(days=180)
-    if default_start < min_date:
-        default_start = min_date
+    if default_start < min_date: default_start = min_date
+        
+    start_date_graph = st.date_input("De:", value=default_start, min_value=min_date, max_value=max_date)
+    end_date_graph = st.date_input("Até:", value=max_date, min_value=min_date, max_value=max_date)
 
-    col_d1, col_d2 = st.columns(2)
-    with col_d1:
-        start_date_graph = st.date_input("De:", value=default_start, min_value=min_date, max_value=max_date)
-    with col_d2:
-        end_date_graph = st.date_input("Até:", value=max_date, min_value=min_date, max_value=max_date)
-
-# Validação do Filtro
-if start_date_graph > end_date_graph:
-    st.error("Erro: Data Inicial maior que Final.")
-    st.stop()
-
-# Aplica Filtro para Gráficos
+# Filtro
 mask = (df_full.index.date >= start_date_graph) & (df_full.index.date <= end_date_graph)
 df_filtered = df_full.loc[mask]
 
-# --- CÁLCULO DE KPIs ---
-try:
-    # Tenta encontrar o índice da data selecionada ou o anterior mais próximo
-    ts_selected = pd.Timestamp(selected_date)
-    idx = df_full.index.get_indexer([ts_selected], method='ffill')[0]
-    
-    if idx == -1: idx = 0 # Segurança se data for muito antiga
-        
-    dia_dados = df_full.iloc[idx]
-    dia_anterior = df_full.iloc[idx - 1] if idx > 0 else dia_dados
-except:
-    # Fallback extremo
-    dia_dados = df_full.iloc[-1]
-    dia_anterior = df_full.iloc[-2]
-
 # --- DASHBOARD ---
-st.title(f"SITE FORA DO AR: {selected_date.strftime('%d/%m/%Y')}")
+st.title(f"Monitor Agro: {end_date_graph.strftime('%d/%m/%Y')}")
 
-# Exibição de Métricas
+# Pega o último dia válido dentro do filtro
+if not df_filtered.empty:
+    dia_dados = df_filtered.iloc[-1]
+    dia_anterior = df_filtered.iloc[-2] if len(df_filtered) > 1 else dia_dados
+else:
+    st.warning("Selecione um período maior.")
+    st.stop()
+
+# KPIs
 col1, col2, col3, col4 = st.columns(4)
-def safe_metric(label, val_curr, val_prev, prefix="R$ "):
-    try:
-        curr = float(val_curr)
-        delta = curr - float(val_prev)
-        st.metric(label, f"{prefix}{curr:.2f}", f"{delta:.2f}")
-    except:
-        st.metric(label, "N/A", "0.00")
+def kpi(label, val, prev, prefix="R$ ", decim=2):
+    delta = val - prev
+    st.metric(label, f"{prefix}{val:.{decim}f}", f"{delta:.{decim}f}")
 
-with col1: safe_metric("💵 Dólar", dia_dados['Dolar'], dia_anterior['Dolar'])
-with col2: safe_metric("🐂 Boi Gordo", dia_dados['Boi_Gordo'], dia_anterior['Boi_Gordo'])
-with col3: safe_metric("🏭 JBS (JBSS3)", dia_dados['JBS'], dia_anterior['JBS'])
-with col4: 
-    chuva = dia_dados.get('Chuva_mm', 0)
-    st.metric("🌧️ Chuva", f"{chuva:.1f} mm")
+with col1: kpi("💵 Dólar (PTAX/Fech.)", dia_dados['Dolar'], dia_anterior['Dolar'], "R$ ", 3)
+with col2: kpi("🐂 Boi Gordo (Est.)", dia_dados['Boi_Gordo'], dia_anterior['Boi_Gordo'])
+with col3: kpi("🏭 JBS (JBSS3)", dia_dados['JBS'], dia_anterior['JBS'])
+with col4: st.metric("🌧️ Chuva (Cuiabá)", f"{dia_dados['Chuva_mm']:.1f} mm")
 
 st.markdown("---")
 
-# --- ABAS DE GRÁFICOS ---
-st.subheader("📈 Inteligência de Mercado")
+# ABAS
+tab1, tab2, tab3 = st.tabs(["📊 Mercado & Tendência", "🌦️ Clima vs. Preço", "💾 Dados Brutos"])
 
-tab1, tab2, tab3, tab4 = st.tabs([
-    "📊 Tendências", 
-    "📦 Volatilidade (Risco)", 
-    "🧲 Correlações",
-    "💾 Downloads"
-])
-
-# 1. TENDÊNCIAS
+# 1. MERCADO
 with tab1:
+    st.subheader("Evolução de Preços (Real Data)")
     fig_ind = go.Figure()
-    fig_ind.add_trace(go.Scatter(x=df_filtered.index, y=df_filtered['Dolar'], name="Dólar", line=dict(color='#2ecc71')))
-    fig_ind.add_trace(go.Scatter(x=df_filtered.index, y=df_filtered['Boi_Gordo'], name="Boi Gordo", visible='legendonly', line=dict(color='#8e44ad')))
-    fig_ind.update_layout(height=400, template="plotly_white")
+    
+    # Eixo Esquerdo (Reais)
+    fig_ind.add_trace(go.Scatter(x=df_filtered.index, y=df_filtered['Boi_Gordo'], name="Boi Gordo (R$)", line=dict(color='#8e44ad', width=2)))
+    fig_ind.add_trace(go.Scatter(x=df_filtered.index, y=df_filtered['JBS'], name="Ação JBS (R$)", line=dict(color='#e67e22', width=2)))
+    
+    # Eixo Direito (Dólar) - Para escala não ficar ruim
+    fig_ind.add_trace(go.Scatter(x=df_filtered.index, y=df_filtered['Dolar'], name="Dólar", line=dict(color='#2ecc71', dash='dot'), yaxis='y2'))
+    
+    fig_ind.update_layout(
+        height=450, 
+        template="plotly_white",
+        yaxis=dict(title="Preço Ativos (R$)"),
+        yaxis2=dict(title="Cotação Dólar", overlaying='y', side='right')
+    )
     st.plotly_chart(fig_ind, use_container_width=True)
 
-# 2. VOLATILIDADE (Boxplot)
+# 2. CLIMA CUIABÁ
 with tab2:
-    st.caption("Distribuição de preços por mês (Identificação de Risco)")
-    df_box = df_filtered.copy()
-    df_box['Mes'] = df_box.index.strftime('%Y-%m')
-    opt = st.radio("Ativo:", ["Boi_Gordo", "Dolar", "JBS"], horizontal=True)
+    st.subheader("Impacto das Chuvas em Cuiabá no Preço")
     
-    fig_box = px.box(df_box, x="Mes", y=opt, points="all", color_discrete_sequence=['#2e7d32'])
-    st.plotly_chart(fig_box, use_container_width=True)
-
-# 3. CORRELAÇÕES (Com Try/Except para evitar erro OLS)
-with tab3:
-    c1, c2 = st.columns(2)
+    col_c1, col_c2 = st.columns([3, 1])
     
-    with c1:
-        st.subheader("Dispersão: Dólar x Boi")
-        try:
-            # Tenta criar com linha de tendência (requer statsmodels)
-            fig_scat = px.scatter(df_filtered, x="Dolar", y="Boi_Gordo", 
-                                 trendline="ols", 
-                                 title="Correlação (Com Tendência)", 
-                                 color="Chuva_mm")
-        except Exception as e:
-            # Se falhar (falta de lib ou dados sujos), cria simples
-            fig_scat = px.scatter(df_filtered, x="Dolar", y="Boi_Gordo", 
-                                 title="Correlação (Simples)", 
-                                 color="Chuva_mm")
-            
-        st.plotly_chart(fig_scat, use_container_width=True)
-
-    with c2:
-        st.subheader("Matriz de Correlação")
-        cols = ['Dolar', 'Boi_Gordo', 'JBS', 'Chuva_mm', 'Temp_Max']
-        cols_validas = [c for c in cols if c in df_filtered.columns]
+    with col_c1:
+        # Gráfico Misto: Barra (Chuva) + Linha (Boi)
+        fig_clima = make_subplots(specs=[[{"secondary_y": True}]])
         
-        if len(cols_validas) > 1:
-            corr = df_filtered[cols_validas].corr()
-            fig_heat = px.imshow(corr, text_auto=True, color_continuous_scale="RdBu_r")
-            st.plotly_chart(fig_heat, use_container_width=True)
+        # Chuva (Barra)
+        fig_clima.add_trace(
+            go.Bar(x=df_filtered.index, y=df_filtered['Chuva_mm'], name="Chuva Cuiabá (mm)", marker_color='#3498db', opacity=0.4),
+            secondary_y=False
+        )
+        
+        # Boi (Linha)
+        fig_clima.add_trace(
+            go.Scatter(x=df_filtered.index, y=df_filtered['Boi_Gordo'], name="Preço Boi (R$)", line=dict(color='#c0392b')),
+            secondary_y=True
+        )
+        
+        fig_clima.update_layout(title="Volume de Chuvas x Cotação", height=400, template="plotly_white")
+        fig_clima.update_yaxes(title_text="Precipitação (mm)", secondary_y=False)
+        fig_clima.update_yaxes(title_text="Preço Arroba (R$)", secondary_y=True)
+        st.plotly_chart(fig_clima, use_container_width=True)
+        
+    with col_c2:
+        # Correlação Rápida
+        st.markdown("**Análise de Correlação**")
+        corr = df_filtered[['Chuva_mm', 'Boi_Gordo']].corr().iloc[0,1]
+        st.info(f"Correlação Chuva x Preço: {corr:.2f}")
+        if corr < -0.3:
+            st.caption("Tendência: Quanto mais chove, menor o preço (pasto melhora, oferta aumenta).")
+        elif corr > 0.3:
+            st.caption("Tendência: Chuva acompanha alta de preço.")
         else:
-            st.info("Dados insuficientes para correlação.")
+            st.caption("Sem correlação clara no período.")
 
-# 4. DOWNLOADS
-with tab4:
-    st.info("Central de Engenharia de Dados")
-    c_dw1, c_dw2 = st.columns(2)
-    with c_dw1: st.download_button("📥 CSV Financeiro", df_fin.to_csv(), "finance.csv", "text/csv")
-    with c_dw2: st.download_button("📥 CSV Clima", df_clima.to_csv(), "weather.csv", "text/csv")
+# 3. DADOS
+with tab3:
+    st.dataframe(df_filtered.sort_index(ascending=False), use_container_width=True)
+    csv = df_filtered.to_csv().encode('utf-8')
+    st.download_button("📥 Baixar Base Consolidada (CSV)", csv, "dados_reais_cuiaba.csv", "text/csv")
