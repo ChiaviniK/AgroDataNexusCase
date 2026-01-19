@@ -4,4 +4,3 @@ yfinance
 requests
 plotly
 numpy
-statsmodels
