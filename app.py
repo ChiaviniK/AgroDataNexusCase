@@ -1,232 +1,161 @@
 import streamlit as st
 import pandas as pd
-import yfinance as yf
 import requests
-import numpy as np
+import plotly.express as px
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+import numpy as np
 from datetime import datetime, timedelta
 
-# --- Configuração "Agro Profissional" ---
-st.set_page_config(page_title="AgroData Nexus | Data Eng.", page_icon="🚜", layout="wide")
+# --- CONFIGURAÇÃO ---
+st.set_page_config(page_title="AgroDataNexus | Intelligence", page_icon="🌱", layout="wide")
 
 st.markdown("""
 <style>
-    .stApp { background-color: #f4f6f0; color: #2c3e50; }
-    h1, h2, h3 { color: #2e7d32 !important; font-family: 'Helvetica Neue', sans-serif; }
-    div[data-testid="stMetric"] {
-        background-color: #ffffff;
-        border-left: 6px solid #2e7d32;
-        padding: 15px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    }
-    .stButton>button { background-color: #2e7d32; color: white; border-radius: 4px; border: none; }
+    .stApp { background-color: #f4f9f4; color: #1e4d2b; }
+    h1, h2 { color: #2e8b57 !important; }
+    .stMetric { background-color: white; border: 1px solid #c3e6cb; border-radius: 8px; padding: 10px; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- FUNÇÕES DE SIMULAÇÃO (FALLBACK) ---
+# ==============================================================================
+# 📡 MOTOR 1: API CLIMÁTICA REAL (OPEN-METEO)
+# ==============================================================================
+@st.cache_data
+def get_climate_history(lat, lon, anos=3):
+    """
+    Busca dados reais de chuva e temperatura na Open-Meteo API.
+    """
+    hoje = datetime.now()
+    inicio = (hoje - timedelta(days=365 * anos)).strftime('%Y-%m-%d')
+    fim = hoje.strftime('%Y-%m-%d')
+    
+    # URL da API (Dados Históricos)
+    url = f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}&start_date={inicio}&end_date={fim}&daily=temperature_2m_max,precipitation_sum&timezone=America%2FSao_Paulo"
+    
+    try:
+        r = requests.get(url, timeout=5)
+        if r.status_code == 200:
+            data = r.json()
+            
+            # Monta o DataFrame
+            df = pd.DataFrame({
+                'Data': data['daily']['time'],
+                'Temp_Max_C': data['daily']['temperature_2m_max'],
+                'Chuva_mm': data['daily']['precipitation_sum']
+            })
+            df['Data'] = pd.to_datetime(df['Data'])
+            df['Ano'] = df['Data'].dt.year
+            return df
+        else:
+            return pd.DataFrame()
+    except:
+        return pd.DataFrame()
 
-def gerar_serie_fake(valor_inicial, volatilidade, n_dias):
-    retornos = np.random.normal(0, volatilidade, n_dias)
-    preco = valor_inicial + np.cumsum(retornos)
-    return preco
-
-def gerar_financeiro_fake():
-    datas = pd.date_range(end=datetime.now(), periods=365, freq='B')
-    n = len(datas)
-    df = pd.DataFrame(index=datas)
-    df['Dolar'] = gerar_serie_fake(5.0, 0.02, n)
-    df['JBS'] = gerar_serie_fake(25.0, 0.3, n)
-    df['Boi_Gordo'] = gerar_serie_fake(230.0, 1.5, n)
+# ==============================================================================
+# 🚜 MOTOR 2: SIMULADOR DE SAFRA (FENOLOGIA)
+# ==============================================================================
+@st.cache_data
+def gerar_dados_safra_atual():
+    """Gera dados biológicos (NDVI) para a Safra 2024."""
+    datas = pd.date_range(start='2024-01-01', end='2024-12-31', freq='D')
+    df = pd.DataFrame({'Data': datas})
+    df['Mes'] = df['Data'].dt.month
+    
+    # Simula Chuva (Sazonalidade MT)
+    conditions = [(df['Mes'].isin([1, 2, 3, 11, 12])), (df['Mes'].isin([6, 7, 8]))]
+    choices = [np.random.gamma(2, 10, len(df)), np.random.exponential(1, len(df))]
+    df['Chuva_mm'] = np.select(conditions, choices, default=np.random.gamma(1, 5, len(df)))
+    
+    # Simula NDVI (Saúde da Planta)
+    def get_ndvi(m):
+        if m in [1, 2]: return 0.85 # Soja cheia
+        if m == 3: return 0.60      # Amarelando
+        if m == 4: return 0.20      # Colheita
+        if m >= 10: return 0.40     # Plantio
+        return 0.15                 # Pousio
+    
+    df['NDVI'] = df['Mes'].apply(get_ndvi) + np.random.normal(0, 0.02, len(df))
+    df['NDVI'] = df['NDVI'].clip(0, 1)
+    
     return df
 
-def gerar_clima_fake():
-    datas = pd.date_range(end=datetime.now(), periods=365, freq='D')
-    n = len(datas)
-    temp = 32 + 5 * np.sin(np.linspace(0, 3.14, n)) + np.random.normal(0, 2, n)
-    chuva = np.random.choice([0, 0, 0, 10, 30, 60], n, p=[0.7, 0.1, 0.1, 0.05, 0.03, 0.02])
-    return pd.DataFrame({'Temp_Max': temp, 'Chuva_mm': chuva}, index=datas)
+# ==============================================================================
+# 🖥️ INTERFACE
+# ==============================================================================
+st.sidebar.image("https://img.icons8.com/dusk/96/tractor.png", width=80)
+st.sidebar.title("AgroDataNexus")
+st.sidebar.markdown("---")
+st.sidebar.info("📍 Fazenda Monitorada:\nSorriso, Mato Grosso\n(Capital da Soja)")
 
-# --- FUNÇÕES DE DADOS REAIS ---
+st.title("🚜 Painel de Inteligência Agrícola")
 
-@st.cache_data(ttl=3600)
-def get_finance_data():
-    tickers = ['BRL=X', 'JBSS3.SA', 'LE=F']
-    try:
-        df = yf.download(tickers, period="1y", interval="1d", progress=False)
-        if isinstance(df.columns, pd.MultiIndex): df = df['Close']
-        if df.empty: raise Exception("Dados vazios")
+tab_safra, tab_hist = st.tabs(["🌱 Safra Atual (Operacional)", "🌦️ Histórico Climático (3 Anos)"])
 
-        df_clean = pd.DataFrame(index=df.index)
-        
-        # Lógica de Fallback Granular (Coluna por Coluna)
-        # 1. Dólar
-        if 'BRL=X' in df.columns and not df['BRL=X'].isnull().all():
-            df_clean['Dolar'] = df['BRL=X']
-        else:
-            df_clean['Dolar'] = gerar_serie_fake(5.10, 0.02, len(df))
-
-        # 2. Gado Futuro
-        if 'LE=F' in df.columns and not df['LE=F'].isnull().all():
-            df_clean['Gado_Futuro_US'] = df['LE=F']
-        else:
-            df_clean['Gado_Futuro_US'] = gerar_serie_fake(180.0, 1.0, len(df))
-
-        # 3. JBS
-        if 'JBSS3.SA' in df.columns and not df['JBSS3.SA'].isnull().all():
-            df_clean['JBS'] = df['JBSS3.SA']
-        else:
-            df_clean['JBS'] = gerar_serie_fake(32.0, 0.4, len(df))
-
-        df_clean.index = df_clean.index.tz_localize(None)
-        df_clean = df_clean.ffill().bfill()
-        df_clean['Boi_Gordo'] = (df_clean['Gado_Futuro_US'] / 100) * df_clean['Dolar'] * 3.5 * 15 
-        
-        return df_clean[['Dolar', 'JBS', 'Boi_Gordo']], True
-
-    except:
-        return gerar_financeiro_fake(), False
-
-@st.cache_data(ttl=3600)
-def get_weather_cuiaba():
-    try:
-        lat, lon = -15.6014, -56.0979
-        end_date = datetime.now().strftime('%Y-%m-%d')
-        start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
-        url = f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}&start_date={start_date}&end_date={end_date}&daily=temperature_2m_max,precipitation_sum&timezone=America%2FCuiaba"
-        
-        res = requests.get(url, timeout=3)
-        data = res.json()
-        if 'daily' not in data: raise Exception("API Vazia")
-
-        df = pd.DataFrame({
-            'Date': data['daily']['time'],
-            'Temp_Max': data['daily']['temperature_2m_max'],
-            'Chuva_mm': data['daily']['precipitation_sum']
-        })
-        df['Date'] = pd.to_datetime(df['Date'])
-        df.set_index('Date', inplace=True)
-        return df, True
-    except:
-        return gerar_clima_fake(), False
-
-# --- CARGA E TRATAMENTO ---
-df_fin, is_real_fin = get_finance_data()
-df_clima, is_real_clima = get_weather_cuiaba()
-
-# Merge interno para o Dashboard (O aluno vê o resultado final, mas baixa separado)
-df_full = pd.concat([df_fin, df_clima], axis=1).sort_index()
-df_full['Dolar'] = df_full['Dolar'].ffill().bfill()
-df_full['JBS'] = df_full['JBS'].ffill().bfill()
-df_full['Boi_Gordo'] = df_full['Boi_Gordo'].ffill().bfill()
-df_full['Chuva_mm'] = df_full['Chuva_mm'].fillna(0)
-df_full['Temp_Max'] = df_full['Temp_Max'].ffill().bfill()
-df_full = df_full.fillna(0)
-
-# --- SIDEBAR ---
-with st.sidebar:
-    st.image("https://img.icons8.com/dusk/96/bull.png", width=80)
-    st.title("AgroData Nexus")
+# --- ABA 1: SAFRA ATUAL (O que já tínhamos) ---
+with tab_safra:
+    st.header("Monitoramento Fenológico: Safra 2024")
+    df_safra = gerar_dados_safra_atual()
     
-    if is_real_fin: st.toast("Mercado: Online", icon="🟢")
-    else: st.toast("Mercado: Simulado", icon="🟠")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Acumulado Chuva (2024)", f"{df_safra['Chuva_mm'].sum():.1f} mm")
+    c2.metric("Vigor Médio (NDVI)", f"{df_safra['NDVI'].mean():.2f}")
+    c3.metric("Status", "Colheita Finalizada", "Abr/24")
     
-    st.markdown("---")
+    # Gráfico Combinado
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=df_safra['Data'], y=df_safra['Chuva_mm'], name='Chuva (mm)', marker_color='#82ca9d'))
+    fig.add_trace(go.Scatter(x=df_safra['Data'], y=df_safra['NDVI']*100, name='NDVI (x100)', line=dict(color='green', width=2)))
+    fig.update_layout(title="Ciclo da Cultura (Chuva vs Biomassa)", height=400)
+    st.plotly_chart(fig, use_container_width=True)
+
+# --- ABA 2: HISTÓRICO REAL (A Novidade) ---
+with tab_hist:
+    st.header("Análise Climática Histórica (Big Data)")
+    st.markdown("Dados reais extraídos da estação meteorológica via satélite (Open-Meteo API).")
     
-    if not df_full.empty:
-        max_date = df_full.index.max().date()
-        min_date = df_full.index.min().date()
+    # Coordenadas de Sorriso - MT
+    LAT, LON = -12.54, -55.72 
+    
+    with st.spinner("Conectando ao Satélite..."):
+        df_hist = get_climate_history(LAT, LON)
+        
+    if not df_hist.empty:
+        # Filtros de Ano
+        anos_disponiveis = sorted(df_hist['Ano'].unique())
+        ano_sel = st.multiselect("Comparar Anos:", anos_disponiveis, default=anos_disponiveis)
+        
+        df_filtrado = df_hist[df_hist['Ano'].isin(ano_sel)]
+        
+        # 1. Gráfico de Precipitação
+        st.subheader("💧 Regime de Chuvas (Comparativo)")
+        fig_chuva = px.bar(
+            df_filtrado, 
+            x='Data', 
+            y='Chuva_mm', 
+            color='Ano', 
+            title="Precipitação Diária (mm)",
+            color_discrete_sequence=px.colors.qualitative.Prism
+        )
+        st.plotly_chart(fig_chuva, use_container_width=True)
+        
+        # 2. Gráfico de Temperatura
+        st.subheader("🌡️ Estresse Térmico")
+        fig_temp = px.line(
+            df_filtrado, 
+            x='Data', 
+            y='Temp_Max_C', 
+            title="Temperaturas Máximas Diárias (°C)",
+            line_shape='spline' # Linha suave
+        )
+        # Adiciona linha de perigo (acima de 35 graus soja sofre abortamento de vagem)
+        fig_temp.add_hline(y=35, line_dash="dot", line_color="red", annotation_text="Estresse Térmico (>35°C)")
+        st.plotly_chart(fig_temp, use_container_width=True)
+        
+        # 3. Tabela e Download
+        st.markdown("---")
+        st.subheader("📥 Exportar Dados Oficiais")
+        st.dataframe(df_filtrado.sort_values('Data', ascending=False).head(100), use_container_width=True)
+        st.download_button("Baixar CSV Histórico", df_hist.to_csv(index=False).encode('utf-8'), "clima_sorriso_mt.csv")
+        
     else:
-        max_date = datetime.now().date()
-        min_date = max_date - timedelta(days=30)
-    
-    default_start = max_date - timedelta(days=90)
-    if default_start < min_date: default_start = min_date
-        
-    start_date_graph = st.date_input("De:", value=default_start, min_value=min_date, max_value=max_date)
-    end_date_graph = st.date_input("Até:", value=max_date, min_value=min_date, max_value=max_date)
-
-mask = (df_full.index.date >= start_date_graph) & (df_full.index.date <= end_date_graph)
-df_filtered = df_full.loc[mask]
-
-# --- DASHBOARD ---
-st.title(f"Monitor Agro: {end_date_graph.strftime('%d/%m/%Y')}")
-
-if df_filtered.empty:
-    st.error("Sem dados.")
-    st.stop()
-
-dia_dados = df_filtered.iloc[-1]
-dia_anterior = df_filtered.iloc[-2] if len(df_filtered) > 1 else dia_dados
-
-col1, col2, col3, col4 = st.columns(4)
-def kpi(label, val, prev, prefix="R$ ", decim=2):
-    try:
-        val, prev = float(val), float(prev)
-        if val == 0: st.metric(label, "N/A", "0.00")
-        else: st.metric(label, f"{prefix}{val:.{decim}f}", f"{val-prev:.{decim}f}")
-    except: st.metric(label, "N/A", "0.00")
-
-with col1: kpi("💵 Dólar", dia_dados['Dolar'], dia_anterior['Dolar'], "R$ ", 3)
-with col2: kpi("🐂 Boi Gordo", dia_dados['Boi_Gordo'], dia_anterior['Boi_Gordo'])
-with col3: kpi("🏭 JBS (JBSS3)", dia_dados['JBS'], dia_anterior['JBS'])
-with col4: st.metric("🌧️ Chuva (Cuiabá)", f"{dia_dados['Chuva_mm']:.1f} mm")
-
-st.markdown("---")
-
-tab1, tab2, tab3 = st.tabs(["📊 Mercado", "🌦️ Clima vs. Preço", "💾 Dados (ETL)"])
-
-with tab1:
-    fig_ind = go.Figure()
-    fig_ind.add_trace(go.Scatter(x=df_filtered.index, y=df_filtered['Boi_Gordo'], name="Boi Gordo (R$)", line=dict(color='#8e44ad')))
-    fig_ind.add_trace(go.Scatter(x=df_filtered.index, y=df_filtered['JBS'], name="Ação JBS (R$)", line=dict(color='#e67e22')))
-    fig_ind.add_trace(go.Scatter(x=df_filtered.index, y=df_filtered['Dolar'], name="Dólar", line=dict(color='#2ecc71', dash='dot'), yaxis='y2'))
-    fig_ind.update_layout(height=450, template="plotly_white", yaxis=dict(title="R$"), yaxis2=dict(title="USD", overlaying='y', side='right'))
-    st.plotly_chart(fig_ind, use_container_width=True)
-
-with tab2:
-    col_c1, col_c2 = st.columns([3, 1])
-    with col_c1:
-        fig_clima = make_subplots(specs=[[{"secondary_y": True}]])
-        fig_clima.add_trace(go.Bar(x=df_filtered.index, y=df_filtered['Chuva_mm'], name="Chuva (mm)", marker_color='#3498db', opacity=0.4), secondary_y=False)
-        fig_clima.add_trace(go.Scatter(x=df_filtered.index, y=df_filtered['Boi_Gordo'], name="Preço Boi (R$)", line=dict(color='#c0392b')), secondary_y=True)
-        fig_clima.update_layout(height=400, template="plotly_white")
-        st.plotly_chart(fig_clima, use_container_width=True)
-    with col_c2:
-        st.markdown("**Correlação**")
-        corr = df_filtered[['Chuva_mm', 'Boi_Gordo']].corr().iloc[0,1]
-        st.info(f"Índice: {corr:.2f}")
-
-# --- ABA DE DOWNLOADS (SEPARADOS) ---
-with tab3:
-    st.subheader("Central de Extração (Desafio ETL)")
-    st.info("💡 As bases de dados estão separadas propositalmente. Você precisará cruzá-las usando a Data como chave.")
-
-    c1, c2 = st.columns(2)
-
-    with c1:
-        st.markdown("##### 💹 Base Financeira (B3/Chicago)")
-        # Seleciona apenas colunas financeiras do DF tratado
-        cols_fin = ['Dolar', 'JBS', 'Boi_Gordo']
-        # Garante que as colunas existem
-        cols_fin_validas = [c for c in cols_fin if c in df_filtered.columns]
-        df_fin_export = df_filtered[cols_fin_validas]
-        
-        st.dataframe(df_fin_export.tail(3), use_container_width=True)
-        csv_fin = df_fin_export.to_csv().encode('utf-8')
-        st.download_button("📥 Baixar Financeiro.csv", csv_fin, "finance_data.csv", "text/csv")
-
-    with c2:
-        st.markdown("##### 🌦️ Base Climática (Cuiabá)")
-        # Seleciona apenas colunas climáticas
-        cols_clima = ['Temp_Max', 'Chuva_mm']
-        cols_clima_validas = [c for c in cols_clima if c in df_filtered.columns]
-        df_clima_export = df_filtered[cols_clima_validas]
-        
-        st.dataframe(df_clima_export.tail(3), use_container_width=True)
-        csv_clima = df_clima_export.to_csv().encode('utf-8')
-        st.download_button("📥 Baixar Clima.csv", csv_clima, "weather_data.csv", "text/csv")
-
-        st.dataframe(df_filtered.sort_index(ascending=False), use_container_width=True)
-        csv = df_filtered.to_csv().encode('utf-8')
-        st.download_button("📥 Baixar CSV", csv, "dados_agro.csv", "text/csv")
+        st.error("Erro ao conectar com a API Open-Meteo.")
